@@ -1,0 +1,101 @@
+#include <ArduinoJson.h>
+#include <Arduino.h>
+#include <time.h>
+#define JST 3600*9
+
+#include <M5StickC.h>
+#include <WiFi.h>
+#include <WiFiMulti.h>
+#include <HTTPClient.h>
+
+// Replace with your WiFi credentials
+#define WIFI_SSID "your_wifi_ssid"
+#define WIFI_PASSWORD "your_wifi_password"
+
+WiFiMulti WiFiMulti;
+int count = 1;
+
+#define USE_SERIAL Serial
+
+WiFiClient client;
+
+// Replace with your HTTP resource URL
+const char* resource = "http://yourserver.com/";
+
+const unsigned long BAUD_RATE = 9600;
+const unsigned long HTTP_TIMEOUT = 10000;
+const size_t MAX_CONTENT_SIZE = 512;
+
+HTTPClient http;
+
+float accX = 0.0F;
+float accY = 0.0F;
+float accZ = 0.0F;
+
+void setup() {
+  USE_SERIAL.begin(115200);
+  M5.begin(); 
+  M5.IMU.Init();
+  M5.Lcd.setRotation(3);
+  M5.Lcd.setCursor(0, 0, 2);
+  WiFiMulti.addAP(WIFI_SSID, WIFI_PASSWORD);
+  M5.Lcd.print("Connecting");
+  while(WiFiMulti.run() != WL_CONNECTED) {
+    M5.Lcd.print(".");
+    delay(1000);
+  }
+  M5.Lcd.println("");
+  M5.Lcd.println("Connected to");
+  M5.Lcd.println(WiFi.localIP());
+  USE_SERIAL.print("Connected to ");
+  USE_SERIAL.println(WiFi.localIP());
+  delay(500);
+  configTzTime("JST-9", "ntp.nict.jp", "ntp.jst.mfeed.ad.jp");
+  while (1500000000 > time(nullptr)) {
+    delay(10);
+  };
+}
+
+void loop() {
+  M5.update();
+  if (M5.BtnA.wasPressed()) {
+    M5.Lcd.println("Pushed");
+    sensor_TinyWebDB();
+    count++;
+  }
+  delay(100);
+}
+
+void sensor_TinyWebDB() {    
+  int httpCode;
+  char tag[32];
+  char value[256];
+  M5.IMU.getAccelData(&accX, &accY, &accZ);
+  const size_t bufferSize = JSON_ARRAY_SIZE(7) + JSON_OBJECT_SIZE(7);
+  DynamicJsonDocument doc(bufferSize);
+  JsonObject root = doc.to<JsonObject>();
+  root["Ver"] = "1.0.0";
+  root["sensor"] = "Tao Zhou";
+  root["localIP"] = WiFi.localIP().toString();
+  root["temperature"] = String(accX);
+  root["pressure_hpa"] = String("On");
+  root["battery_Vcc"] = String(M5.Axp.GetBatVoltage());
+  time_t now = time(nullptr);
+  root["localTime"] = String(now + JST);
+  serializeJson(doc, value);
+  uint64_t chipid=ESP.getEfuseMac();
+  USE_SERIAL.printf("[TinyWebDB] %sn", value);
+  USE_SERIAL.printf("ESP32 Chip id = %06X\n", (uint16_t)(chipid >> 32));
+  sprintf(tag, "Switch-%06x", (uint16_t)(chipid >> 32));
+  httpCode = TinyWebDBStoreValue(tag, value);
+  if(httpCode > 0) {
+    if(httpCode == HTTP_CODE_OK) {
+        TinyWebDBValueStored();
+    }
+  } else {
+    USE_SERIAL.printf("[HTTP] GET... failed, error: %s\n", http.errorToString(httpCode).c_str());
+    TinyWebDBWebServiceError(http.errorToString(httpCode).c_str());
+  }
+  http.end();
+  delay(10000);
+}
